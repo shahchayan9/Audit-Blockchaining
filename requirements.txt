@@ -1,0 +1,4 @@
+grpcio==1.62.0
+grpcio-tools==1.62.0
+cryptography==42.0.2
+protobuf>=4.21.6,<5.0.0 

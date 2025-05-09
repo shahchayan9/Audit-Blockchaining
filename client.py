@@ -2,8 +2,7 @@
 import time
 import grpc
 import common_pb2
-import block_chain_pb2
-import block_chain_pb2_grpc
+import file_audit_pb2_grpc
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
@@ -38,7 +37,7 @@ file_audit.public_key = public_key_str
 
 # gRPC call to full node
 channel = grpc.insecure_channel("localhost:50051")
-stub = block_chain_pb2_grpc.BlockChainServiceStub(channel)
+stub = file_audit_pb2_grpc.FileAuditServiceStub(channel)
 
-response = stub.WhisperAuditRequest(file_audit)
+response = stub.SubmitAudit(file_audit)
 print("Response from Full Node:", response)
