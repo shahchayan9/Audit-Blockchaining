@@ -3,3 +3,4 @@ __pycache__/
 *.pem
 *.pyc
 private_key.pem.pub
+blocks/

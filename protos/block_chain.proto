@@ -20,9 +20,10 @@ message Block {
 }
 
 message BlockProposal {
-    Block block = 1;
-    string proposer_id = 2;
-    int64 timestamp = 3;
+ Block block = 1;
+ string proposer_id = 2;
+ int64 timestamp = 3;
+ int32 block_number = 4;
 }
 
 message Vote {
