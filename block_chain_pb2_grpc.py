@@ -48,8 +48,7 @@ class BlockChainServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def VoteOnBlock(self, request, context):
-        """rpc FinalizeBlock ();
-        """
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')

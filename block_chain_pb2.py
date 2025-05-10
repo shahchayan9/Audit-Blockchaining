@@ -15,23 +15,24 @@ _sym_db = _symbol_database.Default()
 import common_pb2 as common__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11\x62lock_chain.proto\x12\nblockchain\x1a\x0c\x63ommon.proto\"0\n\x0fWhisperResponse\x12\x0e\n\x06status\x18\x01 \x01(\t\x12\r\n\x05\x65rror\x18\x02 \x01(\t\"\xae\x01\n\x05\x42lock\x12\x12\n\nblock_hash\x18\x01 \x01(\t\x12\x1b\n\x13previous_block_hash\x18\x02 \x01(\t\x12\x13\n\x0bmerkle_root\x18\x03 \x01(\t\x12\x14\n\x0c\x62lock_number\x18\x04 \x01(\x05\x12\x11\n\ttimestamp\x18\x05 \x01(\x03\x12\x13\n\x0bproposer_id\x18\x06 \x01(\t\x12!\n\x06\x61udits\x18\x07 \x03(\x0b\x32\x11.common.FileAudit\"o\n\rBlockProposal\x12 \n\x05\x62lock\x18\x01 \x01(\x0b\x32\x11.blockchain.Block\x12\x13\n\x0bproposer_id\x18\x02 \x01(\t\x12\x11\n\ttimestamp\x18\x03 \x01(\x03\x12\x14\n\x0c\x62lock_number\x18\x04 \x01(\x05\"e\n\x04Vote\x12\x10\n\x08\x62lock_id\x18\x01 \x01(\t\x12\x14\n\x0cvalidator_id\x18\x02 \x01(\t\x12\x0f\n\x07\x61pprove\x18\x03 \x01(\x08\x12\x11\n\tsignature\x18\x04 \x01(\t\x12\x11\n\ttimestamp\x18\x05 \x01(\x03\"5\n\x11\x42lockVoteResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t2\xe4\x01\n\x11\x42lockChainService\x12\x45\n\x13WhisperAuditRequest\x12\x11.common.FileAudit\x1a\x1b.blockchain.WhisperResponse\x12H\n\x0cProposeBlock\x12\x19.blockchain.BlockProposal\x1a\x1d.blockchain.BlockVoteResponse\x12>\n\x0bVoteOnBlock\x12\x10.blockchain.Vote\x1a\x1d.blockchain.BlockVoteResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11\x62lock_chain.proto\x12\nblockchain\x1a\x0c\x63ommon.proto\"0\n\x0fWhisperResponse\x12\x0e\n\x06status\x18\x01 \x01(\t\x12\r\n\x05\x65rror\x18\x02 \x01(\t\"\xae\x01\n\x05\x42lock\x12\x12\n\nblock_hash\x18\x01 \x01(\t\x12\x1b\n\x13previous_block_hash\x18\x02 \x01(\t\x12\x13\n\x0bmerkle_root\x18\x03 \x01(\t\x12\x14\n\x0c\x62lock_number\x18\x04 \x01(\x05\x12\x11\n\ttimestamp\x18\x05 \x01(\x03\x12\x13\n\x0bproposer_id\x18\x06 \x01(\t\x12!\n\x06\x61udits\x18\x07 \x03(\x0b\x32\x11.common.FileAudit\"Y\n\rBlockProposal\x12 \n\x05\x62lock\x18\x01 \x01(\x0b\x32\x11.blockchain.Block\x12\x13\n\x0bproposer_id\x18\x02 \x01(\t\x12\x11\n\ttimestamp\x18\x03 \x01(\x03\"e\n\x04Vote\x12\x10\n\x08\x62lock_id\x18\x01 \x01(\t\x12\x14\n\x0cvalidator_id\x18\x02 \x01(\t\x12\x0f\n\x07\x61pprove\x18\x03 \x01(\x08\x12\x11\n\tsignature\x18\x04 \x01(\t\x12\x11\n\ttimestamp\x18\x05 \x01(\x03\"5\n\x11\x42lockVoteResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t2\xe4\x01\n\x11\x42lockChainService\x12\x45\n\x13WhisperAuditRequest\x12\x11.common.FileAudit\x1a\x1b.blockchain.WhisperResponse\x12H\n\x0cProposeBlock\x12\x19.blockchain.BlockProposal\x1a\x1d.blockchain.BlockVoteResponse\x12>\n\x0bVoteOnBlock\x12\x10.blockchain.Vote\x1a\x1d.blockchain.BlockVoteResponseBv\n,com.codecatalyst.auditchain.proto.blockchainB\x0f\x42lockChainProtoZ5github.com/sameersah/auditchain/proto_gen/block_chainb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'block_chain_pb2', _globals)
 if _descriptor._USE_C_DESCRIPTORS == False:
-  DESCRIPTOR._options = None
+  _globals['DESCRIPTOR']._options = None
+  _globals['DESCRIPTOR']._serialized_options = b'\n,com.codecatalyst.auditchain.proto.blockchainB\017BlockChainProtoZ5github.com/sameersah/auditchain/proto_gen/block_chain'
   _globals['_WHISPERRESPONSE']._serialized_start=47
   _globals['_WHISPERRESPONSE']._serialized_end=95
   _globals['_BLOCK']._serialized_start=98
   _globals['_BLOCK']._serialized_end=272
   _globals['_BLOCKPROPOSAL']._serialized_start=274
-  _globals['_BLOCKPROPOSAL']._serialized_end=385
-  _globals['_VOTE']._serialized_start=387
-  _globals['_VOTE']._serialized_end=488
-  _globals['_BLOCKVOTERESPONSE']._serialized_start=490
-  _globals['_BLOCKVOTERESPONSE']._serialized_end=543
-  _globals['_BLOCKCHAINSERVICE']._serialized_start=546
-  _globals['_BLOCKCHAINSERVICE']._serialized_end=774
+  _globals['_BLOCKPROPOSAL']._serialized_end=363
+  _globals['_VOTE']._serialized_start=365
+  _globals['_VOTE']._serialized_end=466
+  _globals['_BLOCKVOTERESPONSE']._serialized_start=468
+  _globals['_BLOCKVOTERESPONSE']._serialized_end=521
+  _globals['_BLOCKCHAINSERVICE']._serialized_start=524
+  _globals['_BLOCKCHAINSERVICE']._serialized_end=752
 # @@protoc_insertion_point(module_scope)

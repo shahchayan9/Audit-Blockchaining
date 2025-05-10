@@ -16,7 +16,7 @@ class FileAuditServiceStub(object):
             channel: A grpc.Channel.
         """
         self.SubmitAudit = channel.unary_unary(
-                '/common.FileAuditService/SubmitAudit',
+                '/fileaudit.FileAuditService/SubmitAudit',
                 request_serializer=common__pb2.FileAudit.SerializeToString,
                 response_deserializer=file__audit__pb2.FileAuditResponse.FromString,
                 )
@@ -41,7 +41,7 @@ def add_FileAuditServiceServicer_to_server(servicer, server):
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'common.FileAuditService', rpc_method_handlers)
+            'fileaudit.FileAuditService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
 
 
@@ -60,7 +60,7 @@ class FileAuditService(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/common.FileAuditService/SubmitAudit',
+        return grpc.experimental.unary_unary(request, target, '/fileaudit.FileAuditService/SubmitAudit',
             common__pb2.FileAudit.SerializeToString,
             file__audit__pb2.FileAuditResponse.FromString,
             options, channel_credentials,

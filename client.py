@@ -4,6 +4,7 @@ import grpc
 import logging
 import random
 import uuid
+import base64
 from typing import Optional, List, Dict
 from datetime import datetime
 from cryptography.hazmat.primitives import hashes, serialization
@@ -12,6 +13,7 @@ from cryptography.hazmat.backends import default_backend
 import common_pb2
 import file_audit_pb2
 import file_audit_pb2_grpc
+import json
 
 # Configure logging
 logging.basicConfig(
@@ -22,11 +24,11 @@ logger = logging.getLogger(__name__)
 
 class AuditClient:
     # Default configuration
-    DEFAULT_NODE_ADDRESS = 'localhost:50051'
+    DEFAULT_NODE_ADDRESS = '169.254.13.100:50051'
     DEFAULT_PRIVATE_KEY_PATH = 'private_key.pem'
     DEFAULT_PUBLIC_KEY_PATH = 'public_key.pem'
-    DEFAULT_OPERATION_INTERVAL = 2.0  # seconds
-    DEFAULT_SIMULATION_DURATION = 60  # seconds
+    DEFAULT_OPERATION_INTERVAL = 5.0  # seconds
+    DEFAULT_SIMULATION_DURATION = 4  # seconds
     
     def __init__(self, 
                  node_address: str = DEFAULT_NODE_ADDRESS,
@@ -84,13 +86,32 @@ class AuditClient:
     def _sign_audit(self, audit: common_pb2.FileAudit) -> str:
         """Sign the audit request"""
         try:
-            msg_bytes = audit.SerializeToString()
+            # Create the audit data structure to sign
+            audit_data = {
+                "req_id": audit.req_id,
+                "file_info": {
+                    "file_id": audit.file_info.file_id,
+                    "file_name": audit.file_info.file_name
+                },
+                "user_info": {
+                    "user_id": audit.user_info.user_id,
+                    "user_name": audit.user_info.user_name
+                },
+                "access_type": audit.access_type,
+                "timestamp": audit.timestamp
+            }
+            
+            # Convert to JSON string and encode to bytes
+            msg_bytes = json.dumps(audit_data, sort_keys=True).encode('utf-8')
+            
+            # Sign the data
             signature = self.private_key.sign(
                 msg_bytes,
                 padding.PKCS1v15(),
                 hashes.SHA256()
             )
-            return signature.hex()
+            signature_encoded = base64.b64encode(signature).decode()
+            return signature_encoded
         except Exception as e:
             logger.error(f"Failed to sign audit: {e}")
             raise
@@ -106,21 +127,37 @@ class AuditClient:
     ) -> common_pb2.FileAudit:
         """Create a new audit request"""
         try:
+            # Create the audit data structure
+            audit_data = {
+                "req_id": req_id,
+                "file_info": {
+                    "file_id": file_id,
+                    "file_name": file_name
+                },
+                "user_info": {
+                    "user_id": user_id,
+                    "user_name": user_name
+                },
+                "access_type": access_type,
+                "timestamp": int(time.time())
+            }
+
+            # Create the protobuf message
             audit = common_pb2.FileAudit(
-                req_id=req_id,
+                req_id=audit_data["req_id"],
                 file_info=common_pb2.FileInfo(
-                    file_id=file_id,
-                    file_name=file_name
+                    file_id=audit_data["file_info"]["file_id"],
+                    file_name=audit_data["file_info"]["file_name"]
                 ),
                 user_info=common_pb2.UserInfo(
-                    user_id=user_id,
-                    user_name=user_name
+                    user_id=audit_data["user_info"]["user_id"],
+                    user_name=audit_data["user_info"]["user_name"]
                 ),
-                access_type=access_type,
-                timestamp=int(time.time())
+                access_type=audit_data["access_type"],
+                timestamp=audit_data["timestamp"]
             )
 
-            # Sign the audit
+            # Sign the audit data (before adding signature and public_key)
             audit.signature = self._sign_audit(audit)
             audit.public_key = self.public_key_str
 
@@ -157,7 +194,7 @@ class AuditClient:
         
         # Create and submit audit
         audit = self.create_audit(
-            req_id=f"req-{uuid.uuid4().hex[:8]}",
+            req_id=f"{uuid.uuid4().hex[:8]}",
             file_id=file_info["id"],
             file_name=file_name,
             user_id=user["id"],

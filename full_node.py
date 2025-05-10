@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 from typing import List, Dict, Set, Optional
+import base64  # Add this import at the top
 
 import block_chain_pb2
 import block_chain_pb2_grpc
@@ -31,11 +32,17 @@ mempool: List[common_pb2.FileAudit] = []
 confirmed_blocks: Dict[int, block_chain_pb2.Block] = {}
 current_block_number = 0
 votes_received: Dict[str, List[block_chain_pb2.Vote]] = {}
-NEIGHBOR_NODES = []
+NEIGHBOR_NODES = [
+#    "169.254.200.79:50052",      # sameer
+#    "169.254.53.212:50051",   # serhat
+#     "10.251.34.233:50053",    # suriya
+    "169.254.183.161:50051",     # harsha
+    "169.254.55.120:50051"       # brandon
+]
 BLOCKS_DIR = "blocks"
 MAX_BLOCK_SIZE = 100  # Maximum number of audits per block
-MIN_MEMPOOL_SIZE = 5  # Minimum number of audits required to propose a block
-NODE_ID = "node-001"  # Unique identifier for this node
+MIN_MEMPOOL_SIZE = 3  # Minimum number of audits required to propose a block
+NODE_ADDRESS = "169.254.13.100:50051"  # Your WSL IP address
 
 def ensure_blocks_directory():
     """Ensure the blocks directory exists"""
@@ -53,8 +60,8 @@ def get_total_nodes() -> int:
 
 def get_node_index() -> int:
     """Get this node's index in the network"""
-    all_nodes = sorted([NODE_ID] + NEIGHBOR_NODES)
-    return all_nodes.index(NODE_ID)
+    all_nodes = sorted([NODE_ADDRESS] + NEIGHBOR_NODES)
+    return all_nodes.index(NODE_ADDRESS)
 
 def is_leader() -> bool:
     """Determine if this node is the current leader using round-robin"""
@@ -89,22 +96,34 @@ def generate_merkle_root(audits: List[common_pb2.FileAudit]) -> str:
 def verify_audit(audit: common_pb2.FileAudit) -> bool:
     """Verify the signature of an audit request"""
     try:
+        # Use the public key from the audit request
         public_key = serialization.load_pem_public_key(
             audit.public_key.encode(), 
             backend=default_backend()
         )
 
-        stripped_request = common_pb2.FileAudit(
-            req_id=audit.req_id,
-            file_info=audit.file_info,
-            user_info=audit.user_info,
-            access_type=audit.access_type,
-            timestamp=audit.timestamp,
-        )
+        # Create the audit data structure to verify
+        audit_data = {
+            "req_id": audit.req_id,
+            "file_info": {
+                "file_id": audit.file_info.file_id,
+                "file_name": audit.file_info.file_name
+            },
+            "user_info": {
+                "user_id": audit.user_info.user_id,
+                "user_name": audit.user_info.user_name
+            },
+            "access_type": audit.access_type,
+            "timestamp": audit.timestamp
+        }
+        
+        # Convert to JSON string and encode to bytes
+        data_to_verify = json.dumps(audit_data, sort_keys=True).encode('utf-8')
+        signature_bytes = base64.b64decode(audit.signature)
 
         public_key.verify(
-            bytes.fromhex(audit.signature),
-            stripped_request.SerializeToString(deterministic=True),
+            signature_bytes,
+            data_to_verify,
             padding.PKCS1v15(),
             hashes.SHA256()
         )
@@ -130,8 +149,13 @@ def whisper_to_neighbors(audit: common_pb2.FileAudit):
             stub = block_chain_pb2_grpc.BlockChainServiceStub(channel)
             response = stub.WhisperAuditRequest(audit)
             logger.info(f"Whispered to {neighbor}: {response.status}")
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNAVAILABLE:
+                logger.warning(f"Node {neighbor} is currently unavailable")
+            else:
+                logger.error(f"Failed to whisper to {neighbor}: {e}")
         except Exception as e:
-            logger.error(f"Failed to whisper to {neighbor}: {e}")
+            logger.error(f"Unexpected error whispering to {neighbor}: {e}")
 
 def save_block_to_disk(block: block_chain_pb2.Block):
     """Save a confirmed block to disk"""
@@ -303,13 +327,13 @@ def build_block() -> Optional[block_chain_pb2.BlockProposal]:
         merkle_root=merkle_root,
         block_number=next_block_number,
         timestamp=timestamp,
-        proposer_id=NODE_ID,
+        proposer_id=NODE_ADDRESS,
         audits=audits_to_include
     )
 
     proposal = block_chain_pb2.BlockProposal(
         block=block,
-        proposer_id=NODE_ID,
+        proposer_id=NODE_ADDRESS,
         timestamp=timestamp,
         block_number=next_block_number
     )
@@ -358,7 +382,7 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
             # Create vote
             vote = block_chain_pb2.Vote(
                 block=block,
-                voter_id="node-001",
+                voter_id=NODE_ADDRESS,
                 approve=True,
                 timestamp=int(time.time())
             )
@@ -464,9 +488,11 @@ def serve():
         server
     )
     
-    server.add_insecure_port("[::]:50051")
+    # Extract port from NODE_ADDRESS
+    port = NODE_ADDRESS.split(":")[1]
+    server.add_insecure_port(f"[::]:{port}")
     server.start()
-    logger.info("Full Node running on port 50051...")
+    logger.info(f"Full Node running on {NODE_ADDRESS}...")
 
     threading.Thread(target=proposer_loop, daemon=True).start()
 
