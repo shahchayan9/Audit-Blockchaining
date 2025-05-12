@@ -24,11 +24,11 @@ logger = logging.getLogger(__name__)
 
 class AuditClient:
     # Default configuration
-    DEFAULT_NODE_ADDRESS = '169.254.13.100:50051'
+    DEFAULT_NODE_ADDRESS = 'localhost:50051'
     DEFAULT_PRIVATE_KEY_PATH = 'private_key.pem'
     DEFAULT_PUBLIC_KEY_PATH = 'public_key.pem'
-    DEFAULT_OPERATION_INTERVAL = 5.0  # seconds
-    DEFAULT_SIMULATION_DURATION = 4  # seconds
+    DEFAULT_OPERATION_INTERVAL = 2.0  # seconds
+    DEFAULT_SIMULATION_DURATION = 10  # seconds
     
     def __init__(self, 
                  node_address: str = DEFAULT_NODE_ADDRESS,
@@ -102,7 +102,7 @@ class AuditClient:
             }
             
             # Convert to JSON string and encode to bytes
-            msg_bytes = json.dumps(audit_data, sort_keys=True).encode('utf-8')
+            msg_bytes = json.dumps(audit_data, sort_keys=True, separators=(',', ':')).encode('utf-8')
             
             # Sign the data
             signature = self.private_key.sign(

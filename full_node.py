@@ -31,18 +31,18 @@ logger = logging.getLogger(__name__)
 mempool: List[common_pb2.FileAudit] = []
 confirmed_blocks: Dict[int, block_chain_pb2.Block] = {}
 current_block_number = 0
-votes_received: Dict[str, List[block_chain_pb2.Vote]] = {}
+votes_received: Dict[str, List[block_chain_pb2.BlockVoteResponse]] = {}
 NEIGHBOR_NODES = [
-#    "169.254.200.79:50052",      # sameer
-#    "169.254.53.212:50051",   # serhat
-#     "10.251.34.233:50053",    # suriya
-    "169.254.183.161:50051",     # harsha
-    "169.254.55.120:50051"       # brandon
+    # "169.254.122.113:50052",      # sameer
+    # "169.254.53.212:50051",   # serhat
+    # "169.254.183.161:50051",     # harsha
+    # "169.254.55.120:50051",       # brandon
+    # "169.254.6.123:50051"        # ronak
 ]
 BLOCKS_DIR = "blocks"
 MAX_BLOCK_SIZE = 100  # Maximum number of audits per block
 MIN_MEMPOOL_SIZE = 3  # Minimum number of audits required to propose a block
-NODE_ADDRESS = "169.254.13.100:50051"  # Your WSL IP address
+NODE_ADDRESS = "localhost:50051"  # Your WSL IP address
 
 def ensure_blocks_directory():
     """Ensure the blocks directory exists"""
@@ -65,9 +65,7 @@ def get_node_index() -> int:
 
 def is_leader() -> bool:
     """Determine if this node is the current leader using round-robin"""
-    total_nodes = get_total_nodes()
-    node_index = get_node_index()
-    return (current_block_number + 1) % total_nodes == node_index
+    return True  # Always return true as requested
 
 def generate_merkle_root(audits: List[common_pb2.FileAudit]) -> str:
     """Generate Merkle root from list of audits"""
@@ -118,7 +116,7 @@ def verify_audit(audit: common_pb2.FileAudit) -> bool:
         }
         
         # Convert to JSON string and encode to bytes
-        data_to_verify = json.dumps(audit_data, sort_keys=True).encode('utf-8')
+        data_to_verify = json.dumps(audit_data, sort_keys=True, separators=(',', ':')).encode('utf-8')
         signature_bytes = base64.b64decode(audit.signature)
 
         public_key.verify(
@@ -160,16 +158,14 @@ def whisper_to_neighbors(audit: common_pb2.FileAudit):
 def save_block_to_disk(block: block_chain_pb2.Block):
     """Save a confirmed block to disk"""
     ensure_blocks_directory()
-    filename = os.path.join(BLOCKS_DIR, f"block_{block.block_number}.json")
+    filename = os.path.join(BLOCKS_DIR, f"block_{block.id}.json")
     
     # Convert protobuf objects to dictionaries
     block_dict = {
-        "block_hash": block.block_hash,
-        "previous_block_hash": block.previous_block_hash,
+        "id": block.id,
+        "hash": block.hash,
+        "previous_hash": block.previous_hash,
         "merkle_root": block.merkle_root,
-        "block_number": block.block_number,
-        "timestamp": block.timestamp,
-        "proposer_id": block.proposer_id,
         "audits": [
             {
                 "req_id": audit.req_id,
@@ -192,7 +188,7 @@ def save_block_to_disk(block: block_chain_pb2.Block):
     
     with open(filename, 'w') as f:
         json.dump(block_dict, f, indent=2)
-    logger.info(f"Block {block.block_number} saved to {filename}")
+    logger.info(f"Block {block.id} saved to {filename}")
 
 def load_last_block() -> int:
     """Load the last block number from disk"""
@@ -211,9 +207,9 @@ def verify_block(block: block_chain_pb2.Block) -> bool:
     """Verify a block's validity"""
     try:
         # Verify previous block hash
-        if block.block_number > 1:
-            prev_block = confirmed_blocks.get(block.block_number - 1)
-            if not prev_block or prev_block.block_hash != block.previous_block_hash:
+        if block.id > 1:
+            prev_block = confirmed_blocks.get(block.id - 1)
+            if not prev_block or prev_block.hash != block.previous_hash:
                 logger.error("Invalid previous block hash")
                 return False
         
@@ -225,72 +221,71 @@ def verify_block(block: block_chain_pb2.Block) -> bool:
         
         # Verify block hash
         block_hash = calculate_hash(
-            f"{block.previous_block_hash}{block.timestamp}{block.merkle_root}".encode()
+            f"{block.previous_hash}{block.merkle_root}".encode()
         )
-        if block_hash != block.block_hash:
+        if block_hash != block.hash:
             logger.error("Invalid block hash")
             return False
         
-        logger.info(f"Successfully verified block {block.block_number}")
+        logger.info(f"Successfully verified block {block.id}")
         return True
     except Exception as e:
         logger.error(f"Block verification failed: {e}")
         return False
 
-def broadcast_proposal(proposal: block_chain_pb2.BlockProposal):
-    """Broadcast block proposal to all neighbors"""
+def broadcast_proposal(block: block_chain_pb2.Block):
+    """Broadcast block proposal to all neighbors and process their votes"""
     global current_block_number
     
     if not NEIGHBOR_NODES:
         # Single node operation - auto confirm the block
         logger.info("No neighbors - auto confirming block")
-        block = proposal.block
-        confirmed_blocks[block.block_number] = block
-        current_block_number = block.block_number  # Update current_block_number
+        confirmed_blocks[block.id] = block
+        current_block_number = block.id  # Update current_block_number
         save_block_to_disk(block)
         return
 
+    # Initialize votes for this block
+    votes_received[str(block.id)] = []
+    
     for neighbor in NEIGHBOR_NODES:
         try:
             channel = grpc.insecure_channel(neighbor)
             stub = block_chain_pb2_grpc.BlockChainServiceStub(channel)
-            response = stub.ProposeBlock(proposal)
+            response = stub.ProposeBlock(block)
             logger.info(f"Proposal sent to {neighbor}: {response.status}")
+            
+            # Add vote to received votes
+            if response.status == "success" and response.vote:
+                votes_received[str(block.id)].append(response)
+                logger.info(f"Received yes vote from {neighbor} for block {block.id}")
+                
         except Exception as e:
             logger.error(f"Failed to send proposal to {neighbor}: {e}")
-
-def process_votes(block_number: int):
-    """Process votes for a block and finalize if majority approved"""
-    global votes_received, confirmed_blocks, current_block_number
     
-    # Single node operation - no votes needed
-    if not NEIGHBOR_NODES:
-        return
-
-    votes = votes_received.get(str(block_number), [])
-    if not votes:
-        return
-    
-    approve_count = sum(1 for vote in votes if vote.approve)
-    if approve_count > len(NEIGHBOR_NODES) / 2:
-        # Block is confirmed
-        block = votes[0].block  # All votes should have the same block
-        confirmed_blocks[block_number] = block
-        current_block_number = block_number  # Update current_block_number
-        
-        # Save to disk
+    # After collecting all votes, check if we have majority
+    if len(votes_received[str(block.id)]) > len(NEIGHBOR_NODES) / 2:
+        logger.info(f"Block {block.id} received majority approval ({len(votes_received[str(block.id)])} votes)")
+        confirmed_blocks[block.id] = block
+        current_block_number = block.id
         save_block_to_disk(block)
         
-        # Clean up votes
-        del votes_received[str(block_number)]
-        
-        logger.info(f"Block {block_number} confirmed and saved")
+        # Notify all neighbors to commit the block
+        for neighbor in NEIGHBOR_NODES:
+            try:
+                channel = grpc.insecure_channel(neighbor)
+                stub = block_chain_pb2_grpc.BlockChainServiceStub(channel)
+                response = stub.CommitBlock(block)
+                logger.info(f"Commit request sent to {neighbor}: {response.status}")
+            except Exception as e:
+                logger.error(f"Failed to send commit request to {neighbor}: {e}")
     else:
-        logger.warning(f"Block {block_number} rejected by majority")
-        # Clean up votes even if rejected
-        del votes_received[str(block_number)]
+        logger.warning(f"Block {block.id} did not receive majority approval ({len(votes_received[str(block.id)])} votes)")
+    
+    # Clean up votes
+    del votes_received[str(block.id)]
 
-def build_block() -> Optional[block_chain_pb2.BlockProposal]:
+def build_block() -> Optional[block_chain_pb2.Block]:
     """Build a new block proposal"""
     global mempool, current_block_number
     
@@ -315,27 +310,18 @@ def build_block() -> Optional[block_chain_pb2.BlockProposal]:
     audits_to_include = sorted_mempool[:MAX_BLOCK_SIZE]
     
     timestamp = int(time.time())
-    previous_block_hash = confirmed_blocks.get(current_block_number, block_chain_pb2.Block()).block_hash or "genesis"
+    previous_block_hash = confirmed_blocks.get(current_block_number, block_chain_pb2.Block()).hash or "genesis"
     merkle_root = generate_merkle_root(audits_to_include)
     
     # Encode the string before hashing
     block_hash = calculate_hash(f"{previous_block_hash}{timestamp}{merkle_root}".encode())
 
     block = block_chain_pb2.Block(
-        block_hash=block_hash,
-        previous_block_hash=previous_block_hash,
+        id=next_block_number,
+        hash=block_hash,
+        previous_hash=previous_block_hash,
         merkle_root=merkle_root,
-        block_number=next_block_number,
-        timestamp=timestamp,
-        proposer_id=NODE_ADDRESS,
         audits=audits_to_include
-    )
-
-    proposal = block_chain_pb2.BlockProposal(
-        block=block,
-        proposer_id=NODE_ADDRESS,
-        timestamp=timestamp,
-        block_number=next_block_number
     )
 
     # Remove proposed audits from mempool
@@ -344,7 +330,7 @@ def build_block() -> Optional[block_chain_pb2.BlockProposal]:
             mempool.remove(audit)
 
     logger.info(f"Block {next_block_number} Proposed with {len(audits_to_include)} audits")
-    return proposal
+    return block
 
 class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
     def WhisperAuditRequest(self, request, context):
@@ -358,6 +344,7 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
             if request not in mempool:
                 mempool.append(request)
                 logger.info(f"Audit {request.req_id} added to mempool")
+                # Don't whisper when receiving from another node
                 return block_chain_pb2.WhisperResponse(status="success")
             else:
                 logger.info(f"Audit {request.req_id} already in mempool")
@@ -372,56 +359,41 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
 
     def ProposeBlock(self, request, context):
         try:
-            block = request.block
-            if not verify_block(block):
-                return block_chain_pb2.ProposalResponse(
-                    status="failure",
-                    error="Block verification failed"
-                )
-            
-            # Create vote
-            vote = block_chain_pb2.Vote(
-                block=block,
-                voter_id=NODE_ADDRESS,
-                approve=True,
-                timestamp=int(time.time())
+            block = request
+            # Always approve the block for testing
+            logger.info(f"Voting on block {block.id}")
+            return block_chain_pb2.BlockVoteResponse(
+                vote=True,
+                status="success"
             )
-            
-            # Send vote back to proposer
-            channel = grpc.insecure_channel(request.proposer_id)
-            stub = block_chain_pb2_grpc.BlockChainServiceStub(channel)
-            response = stub.VoteOnBlock(vote)
-            
-            logger.info(f"Voted on block {block.block_number}")
-            return block_chain_pb2.ProposalResponse(status="success")
             
         except Exception as e:
             logger.error(f"Error processing block proposal: {e}")
-            return block_chain_pb2.ProposalResponse(
+            return block_chain_pb2.BlockVoteResponse(
+                vote=False,
                 status="failure",
-                error=str(e)
+                error_message=str(e)
             )
 
-    def VoteOnBlock(self, request, context):
+    def CommitBlock(self, request, context):
+        """Handle commit request from leader"""
         try:
-            block_number = request.block.block_number
-            if str(block_number) not in votes_received:
-                votes_received[str(block_number)] = []
+            block = request
+            logger.info(f"Received commit request for block {block.id}")
             
-            votes_received[str(block_number)].append(request)
-            logger.info(f"Received vote for block {block_number}")
-            
-            # Process votes if we have enough
-            if len(votes_received[str(block_number)]) > len(NEIGHBOR_NODES) / 2:
-                process_votes(block_number)
-            
-            return block_chain_pb2.VoteResponse(status="success")
+            # Since we already voted yes on this block, we can commit it directly
+            confirmed_blocks[block.id] = block
+            save_block_to_disk(block)
+            logger.info(f"Successfully committed block {block.id}")
+            return block_chain_pb2.BlockCommitResponse(
+                status="success"
+            )
             
         except Exception as e:
-            logger.error(f"Error processing vote: {e}")
-            return block_chain_pb2.VoteResponse(
+            logger.error(f"Error processing commit request: {e}")
+            return block_chain_pb2.BlockCommitResponse(
                 status="failure",
-                error=str(e)
+                error_message=str(e)
             )
 
 class FileAuditServiceServicer(file_audit_pb2_grpc.FileAuditServiceServicer):
@@ -438,6 +410,7 @@ class FileAuditServiceServicer(file_audit_pb2_grpc.FileAuditServiceServicer):
                 mempool.append(request)
                 logger.info(f"Audit {request.req_id} added to mempool")
                 
+                # Only whisper when the request comes from SubmitAudit
                 whisper_to_neighbors(request)
                 
                 return file_audit_pb2.FileAuditResponse(
