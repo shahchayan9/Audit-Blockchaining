@@ -24,11 +24,11 @@ logger = logging.getLogger(__name__)
 
 class AuditClient:
     # Default configuration
-    DEFAULT_NODE_ADDRESS = 'localhost:50051'
+    DEFAULT_NODE_ADDRESS = '169.254.13.100:50051'
     DEFAULT_PRIVATE_KEY_PATH = 'private_key.pem'
     DEFAULT_PUBLIC_KEY_PATH = 'public_key.pem'
     DEFAULT_OPERATION_INTERVAL = 2.0  # seconds
-    DEFAULT_SIMULATION_DURATION = 10  # seconds
+    DEFAULT_SIMULATION_DURATION = 6  # seconds
     
     def __init__(self, 
                  node_address: str = DEFAULT_NODE_ADDRESS,
@@ -194,7 +194,7 @@ class AuditClient:
         
         # Create and submit audit
         audit = self.create_audit(
-            req_id=f"{uuid.uuid4().hex[:8]}",
+            req_id=str(uuid.uuid4()),
             file_id=file_info["id"],
             file_name=file_name,
             user_id=user["id"],

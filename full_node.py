@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 from typing import List, Dict, Set, Optional
-import base64  # Add this import at the top
+import base64
 
 import block_chain_pb2
 import block_chain_pb2_grpc
@@ -33,16 +33,17 @@ confirmed_blocks: Dict[int, block_chain_pb2.Block] = {}
 current_block_number = 0
 votes_received: Dict[str, List[block_chain_pb2.BlockVoteResponse]] = {}
 NEIGHBOR_NODES = [
-    # "169.254.122.113:50052",      # sameer
-    # "169.254.53.212:50051",   # serhat
-    # "169.254.183.161:50051",     # harsha
-    # "169.254.55.120:50051",       # brandon
-    # "169.254.6.123:50051"        # ronak
+    # "169.254.19.242:50052",   # sameer
+    "169.254.124.169:50051",   # serhat
+    "169.254.183.161:50051",  # harsha
+    "169.254.55.120:50051",   # brandon
+    "169.254.103.106:50051"  # jayasurya
+    # "169.254.13.100:50051"    # ronak
 ]
 BLOCKS_DIR = "blocks"
 MAX_BLOCK_SIZE = 100  # Maximum number of audits per block
 MIN_MEMPOOL_SIZE = 3  # Minimum number of audits required to propose a block
-NODE_ADDRESS = "localhost:50051"  # Your WSL IP address
+NODE_ADDRESS = "169.254.13.100:50051"  # Your WSL IP address
 
 def ensure_blocks_directory():
     """Ensure the blocks directory exists"""
@@ -290,7 +291,7 @@ def build_block() -> Optional[block_chain_pb2.Block]:
     global mempool, current_block_number
     
     if not is_leader():
-        logger.info(f"Not the leader for block {current_block_number + 1}, skipping proposal")
+        logger.info(f"Not the leader for block {current_block_number}, skipping proposal")
         return None
         
     if len(mempool) < MIN_MEMPOOL_SIZE:
@@ -298,9 +299,8 @@ def build_block() -> Optional[block_chain_pb2.Block]:
         return None
 
     # Check if we're already waiting for votes on the next block
-    next_block_number = current_block_number + 1
-    if str(next_block_number) in votes_received and NEIGHBOR_NODES:  # Only check if we have neighbors
-        logger.info(f"Already waiting for votes on block {next_block_number}")
+    if str(current_block_number) in votes_received and NEIGHBOR_NODES:  # Only check if we have neighbors
+        logger.info(f"Already waiting for votes on block {current_block_number}")
         return None
 
     logger.info(f"\nProposing a new block with {len(mempool)} audits...")
@@ -310,14 +310,14 @@ def build_block() -> Optional[block_chain_pb2.Block]:
     audits_to_include = sorted_mempool[:MAX_BLOCK_SIZE]
     
     timestamp = int(time.time())
-    previous_block_hash = confirmed_blocks.get(current_block_number, block_chain_pb2.Block()).hash or "genesis"
+    previous_block_hash = confirmed_blocks.get(current_block_number - 1, block_chain_pb2.Block()).hash or "genesis"
     merkle_root = generate_merkle_root(audits_to_include)
     
     # Encode the string before hashing
     block_hash = calculate_hash(f"{previous_block_hash}{timestamp}{merkle_root}".encode())
 
     block = block_chain_pb2.Block(
-        id=next_block_number,
+        id=current_block_number,
         hash=block_hash,
         previous_hash=previous_block_hash,
         merkle_root=merkle_root,
@@ -329,8 +329,44 @@ def build_block() -> Optional[block_chain_pb2.Block]:
         if audit in mempool:
             mempool.remove(audit)
 
-    logger.info(f"Block {next_block_number} Proposed with {len(audits_to_include)} audits")
+    logger.info(f"Block {current_block_number} Proposed with {len(audits_to_include)} audits")
     return block
+
+def send_heartbeat_to_neighbors():
+    """Send heartbeat to all neighbor nodes"""
+    for neighbor in NEIGHBOR_NODES:
+        try:
+            channel = grpc.insecure_channel(neighbor)
+            stub = block_chain_pb2_grpc.BlockChainServiceStub(channel)
+            
+            # Create heartbeat request
+            request = block_chain_pb2.HeartbeatRequest(
+                from_address="Yash@" + NODE_ADDRESS,
+                current_leader_address=NODE_ADDRESS if is_leader() else "",
+                latest_block_id=current_block_number,
+                mem_pool_size=len(mempool)
+            )
+            
+            response = stub.SendHeartbeat(request)
+            # if response.status == "success":
+            #     logger.info(f"Successfully sent heartbeat to {neighbor}")
+            # else:
+            #     logger.warning(f"Failed to send heartbeat to {neighbor}: {response.error_message}")
+                
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNAVAILABLE:
+                logger.warning(f"Node {neighbor} is currently unavailable")
+            else:
+                logger.error(f"Failed to send heartbeat to {neighbor}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error sending heartbeat to {neighbor}: {e}")
+
+def heartbeat_loop():
+    """Loop that periodically sends heartbeats to neighbors"""
+    while True:
+        send_heartbeat_to_neighbors()
+        logger.info(f"Sent heartbeat to neighbors")
+        time.sleep(10)
 
 class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
     def WhisperAuditRequest(self, request, context):
@@ -392,6 +428,22 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         except Exception as e:
             logger.error(f"Error processing commit request: {e}")
             return block_chain_pb2.BlockCommitResponse(
+                status="failure",
+                error_message=str(e)
+            )
+
+    def SendHeartbeat(self, request, context):
+        """Handle heartbeat request from other nodes"""
+        try:
+            # logger.info(f"Received heartbeat from {request.from_address}")
+            
+            return block_chain_pb2.HeartbeatResponse(
+                status="success"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error processing heartbeat: {e}")
+            return block_chain_pb2.HeartbeatResponse(
                 status="failure",
                 error_message=str(e)
             )
@@ -467,7 +519,9 @@ def serve():
     server.start()
     logger.info(f"Full Node running on {NODE_ADDRESS}...")
 
+    # Start both the proposer and heartbeat loops
     threading.Thread(target=proposer_loop, daemon=True).start()
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
 
     server.wait_for_termination()
 
