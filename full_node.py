@@ -33,12 +33,13 @@ confirmed_blocks: Dict[int, block_chain_pb2.Block] = {}
 current_block_number = 0
 votes_received: Dict[str, List[block_chain_pb2.BlockVoteResponse]] = {}
 NEIGHBOR_NODES = [
-    # "169.254.19.242:50052",   # sameer
-    "169.254.124.169:50051",   # serhat
+    "169.254.103.61:50052",   # sameer
+    "169.254.162.53:50051",   # serhat
     "169.254.183.161:50051",  # harsha
-    "169.254.55.120:50051",   # brandon
-    "169.254.103.106:50051"  # jayasurya
-    # "169.254.13.100:50051"    # ronak
+    "169.254.55.120:50051",    # brandon
+    "169.254.103.106:50051",   # jayasurya
+    "169.254.137.247:50051",   # ronak
+    "169.254.159.92:50053"     # suriya
 ]
 BLOCKS_DIR = "blocks"
 MAX_BLOCK_SIZE = 100  # Maximum number of audits per block
@@ -53,44 +54,28 @@ def ensure_blocks_directory():
 
 def calculate_hash(data: bytes) -> str:
     """Calculate SHA-256 hash of input data"""
-    return hashlib.sha256(data).hexdigest()
-
-def get_total_nodes() -> int:
-    """Get total number of nodes in the network"""
-    return len(NEIGHBOR_NODES) + 1  # Including self
-
-def get_node_index() -> int:
-    """Get this node's index in the network"""
-    all_nodes = sorted([NODE_ADDRESS] + NEIGHBOR_NODES)
-    return all_nodes.index(NODE_ADDRESS)
-
+    return hashlib.sha256(data).hexdigest()    
+    
 def is_leader() -> bool:
-    """Determine if this node is the current leader using round-robin"""
+    """Determine if this node is the current leader"""
     return True  # Always return true as requested
 
-def generate_merkle_root(audits: List[common_pb2.FileAudit]) -> str:
-    """Generate Merkle root from list of audits"""
-    if not audits:
-        return ""
-    
-    # Sort audits by timestamp and req_id for deterministic ordering
-    sorted_audits = sorted(audits, key=lambda x: (x.timestamp, x.req_id))
-    
-    # Create leaf nodes - SerializeToString already returns bytes
-    leaves = [calculate_hash(audit.SerializeToString(deterministic=True)) for audit in sorted_audits]
-    
-    # Build Merkle tree
-    while len(leaves) > 1:
-        new_leaves = []
-        for i in range(0, len(leaves), 2):
-            if i + 1 < len(leaves):
-                combined = leaves[i] + leaves[i + 1]
-            else:
-                combined = leaves[i] + leaves[i]
-            new_leaves.append(calculate_hash(combined.encode()))  # Encode string concatenation
-        leaves = new_leaves
-    
-    return leaves[0]
+def get_audit_json(audit: common_pb2.FileAudit) -> str:
+    """Convert audit to JSON format"""
+    audit_data = {
+        "access_type": audit.access_type,
+        "file_info": {
+            "file_id": audit.file_info.file_id,
+            "file_name": audit.file_info.file_name
+        },
+        "req_id": audit.req_id,
+        "timestamp": audit.timestamp,
+        "user_info": {
+            "user_id": audit.user_info.user_id,
+            "user_name": audit.user_info.user_name
+        }
+    }
+    return json.dumps(audit_data, sort_keys=True, separators=(",", ":"))
 
 def verify_audit(audit: common_pb2.FileAudit) -> bool:
     """Verify the signature of an audit request"""
@@ -102,22 +87,7 @@ def verify_audit(audit: common_pb2.FileAudit) -> bool:
         )
 
         # Create the audit data structure to verify
-        audit_data = {
-            "req_id": audit.req_id,
-            "file_info": {
-                "file_id": audit.file_info.file_id,
-                "file_name": audit.file_info.file_name
-            },
-            "user_info": {
-                "user_id": audit.user_info.user_id,
-                "user_name": audit.user_info.user_name
-            },
-            "access_type": audit.access_type,
-            "timestamp": audit.timestamp
-        }
-        
-        # Convert to JSON string and encode to bytes
-        data_to_verify = json.dumps(audit_data, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        data_to_verify = get_audit_json(audit).encode('utf-8')
         signature_bytes = base64.b64decode(audit.signature)
 
         public_key.verify(
@@ -204,6 +174,28 @@ def load_last_block() -> int:
     logger.info(f"Loaded last block number: {last_block}")
     return last_block
 
+def generate_merkle_root(audits: List[common_pb2.FileAudit]) -> str:
+    """Generate Merkle root from list of audits"""
+    if not audits:
+        return ""
+    
+    # Create list of hashes from audits
+    hashes = []
+    for audit in audits:
+        # Hash the JSON string
+        hashes.append(calculate_hash(get_audit_json(audit).encode()))
+    
+    # Build Merkle tree
+    while len(hashes) > 1:
+        new_hashes = []
+        for i in range(0, len(hashes), 2):
+            left = hashes[i]
+            right = hashes[i + 1] if i + 1 < len(hashes) else left
+            new_hashes.append(calculate_hash((left + right).encode()))
+        hashes = new_hashes
+    
+    return hashes[0] if hashes else ""
+
 def verify_block(block: block_chain_pb2.Block) -> bool:
     """Verify a block's validity"""
     try:
@@ -216,14 +208,15 @@ def verify_block(block: block_chain_pb2.Block) -> bool:
         
         # Verify Merkle root
         calculated_root = generate_merkle_root(block.audits)
+        logger.info(f"Calculated Merkle root: {calculated_root}")
+        logger.info(f"Block Merkle root: {block.merkle_root}")
         if calculated_root != block.merkle_root:
             logger.error("Invalid Merkle root")
             return False
         
         # Verify block hash
-        block_hash = calculate_hash(
-            f"{block.previous_hash}{block.merkle_root}".encode()
-        )
+        audits_string = "".join([get_audit_json(audit) for audit in block.audits])
+        block_hash = calculate_hash(f"{block.id}{block.previous_hash}{block.merkle_root}{audits_string}".encode())
         if block_hash != block.hash:
             logger.error("Invalid block hash")
             return False
@@ -264,14 +257,22 @@ def broadcast_proposal(block: block_chain_pb2.Block):
         except Exception as e:
             logger.error(f"Failed to send proposal to {neighbor}: {e}")
     
-    # After collecting all votes, check if we have majority
-    if len(votes_received[str(block.id)]) > len(NEIGHBOR_NODES) / 2:
-        logger.info(f"Block {block.id} received majority approval ({len(votes_received[str(block.id)])} votes)")
-        confirmed_blocks[block.id] = block
-        current_block_number = block.id
-        save_block_to_disk(block)
+    # After collecting all votes, check if we have full consensus
+    if len(votes_received[str(block.id)]) == len(NEIGHBOR_NODES):
+        logger.info(f"Block {block.id} received full consensus: ({len(votes_received[str(block.id)])} votes)")
         
-        # Notify all neighbors to commit the block
+        # First save the block to disk
+        confirmed_blocks[block.id] = block
+        save_block_to_disk(block)
+        current_block_number = block.id
+        
+        # Then remove audits from mempool
+        for audit in block.audits:
+            if audit in mempool:
+                mempool.remove(audit)
+                logger.info(f"Removed audit {audit.req_id} from mempool")
+        
+        # Finally notify all neighbors to commit the block
         for neighbor in NEIGHBOR_NODES:
             try:
                 channel = grpc.insecure_channel(neighbor)
@@ -281,7 +282,7 @@ def broadcast_proposal(block: block_chain_pb2.Block):
             except Exception as e:
                 logger.error(f"Failed to send commit request to {neighbor}: {e}")
     else:
-        logger.warning(f"Block {block.id} did not receive majority approval ({len(votes_received[str(block.id)])} votes)")
+        logger.warning(f"Block {block.id} did not receive full consensus ({len(votes_received[str(block.id)])}/{len(NEIGHBOR_NODES)} votes)")
     
     # Clean up votes
     del votes_received[str(block.id)]
@@ -309,12 +310,15 @@ def build_block() -> Optional[block_chain_pb2.Block]:
     sorted_mempool = sorted(mempool, key=lambda x: (x.timestamp, x.req_id))
     audits_to_include = sorted_mempool[:MAX_BLOCK_SIZE]
     
-    timestamp = int(time.time())
     previous_block_hash = confirmed_blocks.get(current_block_number - 1, block_chain_pb2.Block()).hash or "genesis"
     merkle_root = generate_merkle_root(audits_to_include)
     
-    # Encode the string before hashing
-    block_hash = calculate_hash(f"{previous_block_hash}{timestamp}{merkle_root}".encode())
+    # Serialize audits for hash calculation
+    audits_string = "".join([get_audit_json(audit) for audit in audits_to_include])
+    
+    # Calculate block hash
+    data = f"{current_block_number}{previous_block_hash}{merkle_root}{audits_string}"
+    block_hash = calculate_hash(data.encode())
 
     block = block_chain_pb2.Block(
         id=current_block_number,
@@ -323,11 +327,6 @@ def build_block() -> Optional[block_chain_pb2.Block]:
         merkle_root=merkle_root,
         audits=audits_to_include
     )
-
-    # Remove proposed audits from mempool
-    for audit in audits_to_include:
-        if audit in mempool:
-            mempool.remove(audit)
 
     logger.info(f"Block {current_block_number} Proposed with {len(audits_to_include)} audits")
     return block
@@ -365,7 +364,6 @@ def heartbeat_loop():
     """Loop that periodically sends heartbeats to neighbors"""
     while True:
         send_heartbeat_to_neighbors()
-        logger.info(f"Sent heartbeat to neighbors")
         time.sleep(10)
 
 class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
@@ -374,7 +372,7 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
             if not verify_audit(request):
                 return block_chain_pb2.WhisperResponse(
                     status="failure", 
-                    error="Signature verification failed"
+                    error_message="Signature verification failed"
                 )
 
             if request not in mempool:
@@ -390,14 +388,35 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
             logger.error(f"Error processing audit {request.req_id}: {e}")
             return block_chain_pb2.WhisperResponse(
                 status="failure", 
-                error=str(e)
+                error_message=str(e)
             )
 
     def ProposeBlock(self, request, context):
         try:
             block = request
-            # Always approve the block for testing
             logger.info(f"Voting on block {block.id}")
+            
+            # Verify previous block hash and merkle root
+            if not verify_block(block):
+                logger.error(f"Block {block.id} failed verification")
+                return block_chain_pb2.BlockVoteResponse(
+                    vote=False,
+                    status="failure",
+                    error_message="Block verification failed"
+                )
+            
+            # Verify all audit signatures in the block
+            for audit in block.audits:
+                if not verify_audit(audit):
+                    logger.error(f"Audit {audit.req_id} in block {block.id} failed signature verification")
+                    return block_chain_pb2.BlockVoteResponse(
+                        vote=False,
+                        status="failure",
+                        error_message=f"Audit {audit.req_id} signature verification failed"
+                    )
+            
+            logger.info(f"Block {block.id} passed all verifications")
+            
             return block_chain_pb2.BlockVoteResponse(
                 vote=True,
                 status="success"
@@ -414,12 +433,20 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
     def CommitBlock(self, request, context):
         """Handle commit request from leader"""
         try:
+            global current_block_number
             block = request
             logger.info(f"Received commit request for block {block.id}")
+            
+            # Remove audits from mempool that are in this block
+            for audit in block.audits:
+                if audit in mempool:
+                    mempool.remove(audit)
+                    logger.info(f"Removed audit {audit.req_id} from mempool")
             
             # Since we already voted yes on this block, we can commit it directly
             confirmed_blocks[block.id] = block
             save_block_to_disk(block)
+            current_block_number = len(confirmed_blocks) - 1
             logger.info(f"Successfully committed block {block.id}")
             return block_chain_pb2.BlockCommitResponse(
                 status="success"
@@ -435,7 +462,9 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
     def SendHeartbeat(self, request, context):
         """Handle heartbeat request from other nodes"""
         try:
-            # logger.info(f"Received heartbeat from {request.from_address}")
+            logger.info(f"Received heartbeat from {request.from_address}")
+            logger.info(f"Current block number: {request.latest_block_id}")
+            logger.info(f"Mempool size: {request.mem_pool_size}")
             
             return block_chain_pb2.HeartbeatResponse(
                 status="success"
