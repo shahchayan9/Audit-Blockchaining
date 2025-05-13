@@ -30,16 +30,20 @@ logger = logging.getLogger(__name__)
 # Global state
 mempool: List[common_pb2.FileAudit] = []
 confirmed_blocks: Dict[int, block_chain_pb2.Block] = {}
-current_block_number = 0
+current_block_number = -1
 votes_received: Dict[str, List[block_chain_pb2.BlockVoteResponse]] = {}
+current_leader = None  # Track the current leader's address
+server_health: Dict[str, float] = {}  # Track last heartbeat time for each server
+server_heartbeat_data: Dict[str, Dict] = {}  # Track heartbeat data for each server
+HEARTBEAT_TIMEOUT = 15  # Seconds before marking a server as unhealthy
 NEIGHBOR_NODES = [
-    "169.254.103.61:50052",   # sameer
-    "169.254.162.53:50051",   # serhat
+    # "169.254.103.61:50052",   # sameer
+    # "169.254.162.53:50051",   # serhat
     "169.254.183.161:50051",  # harsha
     "169.254.55.120:50051",    # brandon
-    "169.254.103.106:50051",   # jayasurya
-    "169.254.137.247:50051",   # ronak
-    "169.254.159.92:50053"     # suriya
+    "169.254.145.197:50051"   # jayasurya
+    # "169.254.137.247:50051",   # ronak
+    # "169.254.159.92:50053"     # suriya
 ]
 BLOCKS_DIR = "blocks"
 MAX_BLOCK_SIZE = 100  # Maximum number of audits per block
@@ -166,8 +170,8 @@ def load_last_block() -> int:
     ensure_blocks_directory()
     block_files = [f for f in os.listdir(BLOCKS_DIR) if f.startswith("block_") and f.endswith(".json")]
     if not block_files:
-        logger.info("No existing blocks found, starting from block 0")
-        return 0
+        logger.info("No existing blocks found, starting from block -1")
+        return -1
     
     block_numbers = [int(f.split("_")[1].split(".")[0]) for f in block_files]
     last_block = max(block_numbers)
@@ -208,8 +212,6 @@ def verify_block(block: block_chain_pb2.Block) -> bool:
         
         # Verify Merkle root
         calculated_root = generate_merkle_root(block.audits)
-        logger.info(f"Calculated Merkle root: {calculated_root}")
-        logger.info(f"Block Merkle root: {block.merkle_root}")
         if calculated_root != block.merkle_root:
             logger.error("Invalid Merkle root")
             return False
@@ -235,8 +237,8 @@ def broadcast_proposal(block: block_chain_pb2.Block):
         # Single node operation - auto confirm the block
         logger.info("No neighbors - auto confirming block")
         confirmed_blocks[block.id] = block
-        current_block_number = block.id  # Update current_block_number
         save_block_to_disk(block)
+        current_block_number = len(confirmed_blocks) - 1  # Update current_block_number
         return
 
     # Initialize votes for this block
@@ -264,7 +266,7 @@ def broadcast_proposal(block: block_chain_pb2.Block):
         # First save the block to disk
         confirmed_blocks[block.id] = block
         save_block_to_disk(block)
-        current_block_number = block.id
+        current_block_number = len(confirmed_blocks) - 1
         
         # Then remove audits from mempool
         for audit in block.audits:
@@ -300,7 +302,7 @@ def build_block() -> Optional[block_chain_pb2.Block]:
         return None
 
     # Check if we're already waiting for votes on the next block
-    if str(current_block_number) in votes_received and NEIGHBOR_NODES:  # Only check if we have neighbors
+    if str(current_block_number) in votes_received and get_healthy_neighbors():  # Only check if we have healthy neighbors
         logger.info(f"Already waiting for votes on block {current_block_number}")
         return None
 
@@ -310,25 +312,26 @@ def build_block() -> Optional[block_chain_pb2.Block]:
     sorted_mempool = sorted(mempool, key=lambda x: (x.timestamp, x.req_id))
     audits_to_include = sorted_mempool[:MAX_BLOCK_SIZE]
     
-    previous_block_hash = confirmed_blocks.get(current_block_number - 1, block_chain_pb2.Block()).hash or "genesis"
+    previous_block_hash = confirmed_blocks.get(current_block_number, block_chain_pb2.Block()).hash or "genesis"
     merkle_root = generate_merkle_root(audits_to_include)
     
     # Serialize audits for hash calculation
     audits_string = "".join([get_audit_json(audit) for audit in audits_to_include])
     
     # Calculate block hash
-    data = f"{current_block_number}{previous_block_hash}{merkle_root}{audits_string}"
+    data = f"{current_block_number + 1}{previous_block_hash}{merkle_root}{audits_string}"
+    logger.info(f"Data: {data}")
     block_hash = calculate_hash(data.encode())
 
     block = block_chain_pb2.Block(
-        id=current_block_number,
+        id=current_block_number + 1,
         hash=block_hash,
         previous_hash=previous_block_hash,
         merkle_root=merkle_root,
         audits=audits_to_include
     )
 
-    logger.info(f"Block {current_block_number} Proposed with {len(audits_to_include)} audits")
+    logger.info(f"Block {current_block_number + 1} Proposed with {len(audits_to_include)} audits")
     return block
 
 def send_heartbeat_to_neighbors():
@@ -340,8 +343,8 @@ def send_heartbeat_to_neighbors():
             
             # Create heartbeat request
             request = block_chain_pb2.HeartbeatRequest(
-                from_address="Yash@" + NODE_ADDRESS,
-                current_leader_address=NODE_ADDRESS if is_leader() else "",
+                from_address=NODE_ADDRESS,
+                current_leader_address=current_leader,
                 latest_block_id=current_block_number,
                 mem_pool_size=len(mempool)
             )
@@ -361,10 +364,130 @@ def send_heartbeat_to_neighbors():
             logger.error(f"Unexpected error sending heartbeat to {neighbor}: {e}")
 
 def heartbeat_loop():
-    """Loop that periodically sends heartbeats to neighbors"""
+    """Loop that periodically sends heartbeats to neighbors and checks leader health"""
     while True:
         send_heartbeat_to_neighbors()
         time.sleep(10)
+        check_leader_health()  # Check leader health after sending heartbeats
+
+def is_server_healthy(address: str) -> bool:
+    """Check if a server is healthy based on its last heartbeat"""
+    if address not in server_health:
+        return False
+    return (time.time() - server_health[address]) < HEARTBEAT_TIMEOUT
+
+def get_healthy_neighbors() -> List[str]:
+    """Get list of healthy neighbor nodes"""
+    return [node for node in NEIGHBOR_NODES if is_server_healthy(node)]
+
+def trigger_election():
+    """Trigger a new election by sending election requests to all neighbors"""
+    global current_leader
+    
+    logger.info("Triggering new election")
+    max_votes = len(get_healthy_neighbors())
+    if max_votes == 0:
+        logger.info("No healthy neighbors, skipping election")
+        time.sleep(10)
+        return
+    
+    votes_needed = max_votes // 2 + 1  # Majority of nodes
+    votes_received = 0
+    
+    for neighbor in get_healthy_neighbors():
+        try:
+            channel = grpc.insecure_channel(neighbor)
+            stub = block_chain_pb2_grpc.BlockChainServiceStub(channel)
+            
+            request = block_chain_pb2.TriggerElectionRequest(
+                address=NODE_ADDRESS
+            )
+            
+            response = stub.TriggerElection(request)
+            if response.vote:
+                votes_received += 1
+                logger.info(f"Received vote from {neighbor}")
+                
+        except Exception as e:
+            logger.error(f"Failed to request vote from {neighbor}: {e}")
+    
+    # If we got majority votes, notify all nodes of our leadership
+    if votes_received >= votes_needed:
+        logger.info(f"Won election with {votes_received}/{max_votes} votes")
+        current_leader = NODE_ADDRESS
+        notify_leadership()
+    else:
+        logger.info(f"Lost election with {votes_received}/{max_votes} votes")
+
+def notify_leadership():
+    """Notify all neighbors of our leadership"""
+    global current_leader
+    current_leader = NODE_ADDRESS
+    
+    for neighbor in NEIGHBOR_NODES:
+        try:
+            channel = grpc.insecure_channel(neighbor)
+            stub = block_chain_pb2_grpc.BlockChainServiceStub(channel)
+            
+            request = block_chain_pb2.NotifyLeadershipRequest(
+                address=NODE_ADDRESS
+            )
+            
+            response = stub.NotifyLeadership(request)
+            logger.info(f"Leadership notification sent to {neighbor}: {response.status}")
+            
+        except Exception as e:
+            logger.error(f"Failed to notify leadership to {neighbor}: {e}")
+
+def check_leader_health():
+    """Check if there is no current leader or if the current leader is unhealthy and trigger re-election if needed"""
+    global current_leader
+    if current_leader is None or (current_leader != NODE_ADDRESS and not is_server_healthy(current_leader)):
+        logger.warning(f"No current leader or current leader {current_leader} is unhealthy, triggering re-election")
+        trigger_election()
+
+def update_server_heartbeat_data(address: str, block_id: int, mempool_size: int):
+    """Update heartbeat data for a server"""
+    global server_heartbeat_data
+    server_heartbeat_data[address] = {
+        'block_id': block_id,
+        'mempool_size': mempool_size,
+        'last_update': time.time()
+    }
+
+def compare_server_metrics(candidate_address: str) -> bool:
+    """Compare server metrics to determine if candidate should be leader"""
+    global server_heartbeat_data, NODE_ADDRESS
+    
+    # Get our metrics
+    our_metrics = server_heartbeat_data.get(NODE_ADDRESS, {
+        'block_id': current_block_number,
+        'mempool_size': len(mempool)
+    })
+    
+    # Get candidate metrics
+    candidate_metrics = server_heartbeat_data.get(candidate_address, {
+        'block_id': 0,
+        'mempool_size': 0
+    })
+    
+    # logger.info(f"Candidate metrics: {candidate_metrics}")
+    # logger.info(f"Our metrics: {our_metrics}")
+
+    # Compare block IDs first
+    if candidate_metrics['block_id'] > our_metrics['block_id']:
+        return True
+    elif candidate_metrics['block_id'] < our_metrics['block_id']:
+        return False
+    
+    # If block IDs are equal, compare mempool sizes
+    if candidate_metrics['mempool_size'] > our_metrics['mempool_size']:
+        return True
+    elif candidate_metrics['mempool_size'] < our_metrics['mempool_size']:
+        return False
+    
+    # If both metrics are equal, compare IP addresses
+    return candidate_address > NODE_ADDRESS
 
 class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
     def WhisperAuditRequest(self, request, context):
@@ -462,9 +585,28 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
     def SendHeartbeat(self, request, context):
         """Handle heartbeat request from other nodes"""
         try:
+            global server_health, server_heartbeat_data, current_leader
             logger.info(f"Received heartbeat from {request.from_address}")
-            logger.info(f"Current block number: {request.latest_block_id}")
-            logger.info(f"Mempool size: {request.mem_pool_size}")
+            logger.info(f"Current leader from heartbeat: {request.current_leader_address}")
+            
+            # Update server health status
+            server_health[request.from_address] = time.time()
+            
+            # Update heartbeat data
+            update_server_heartbeat_data(
+                request.from_address,
+                request.latest_block_id,
+                request.mem_pool_size
+            )
+            
+            # Only update current_leader if it's None
+            if current_leader is None and request.current_leader_address:
+                current_leader = request.current_leader_address
+                logger.info(f"Updated current leader to {current_leader}")
+            
+            # If we received a heartbeat from the current leader, they're healthy
+            if request.from_address == current_leader:
+                logger.info(f"Current leader {current_leader} is healthy")
             
             return block_chain_pb2.HeartbeatResponse(
                 status="success"
@@ -473,6 +615,58 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         except Exception as e:
             logger.error(f"Error processing heartbeat: {e}")
             return block_chain_pb2.HeartbeatResponse(
+                status="failure",
+                error_message=str(e)
+            )
+
+    def TriggerElection(self, request, context):
+        """Handle election trigger request from a candidate node"""
+        try:
+            global current_leader
+            logger.info(f"Received election trigger from {request.address}")
+            
+            # Compare server metrics to decide vote
+            should_vote_yes = compare_server_metrics(request.address)
+            
+            if should_vote_yes:
+                logger.info(f"Voting yes for {request.address} based on metrics")
+                return block_chain_pb2.TriggerElectionResponse(
+                    vote=True,
+                    status="success"
+                )
+            else:
+                logger.info(f"Voting no for {request.address} based on metrics")
+                return block_chain_pb2.TriggerElectionResponse(
+                    vote=False,
+                    status="success",
+                    error_message="Better candidate available"
+                )
+            
+        except Exception as e:
+            logger.error(f"Error processing election trigger: {e}")
+            return block_chain_pb2.TriggerElectionResponse(
+                vote=False,
+                status="failure",
+                error_message=str(e)
+            )
+
+    def NotifyLeadership(self, request, context):
+        """Handle leadership notification from the newly elected leader"""
+        try:
+            global current_leader
+            logger.info(f"Received leadership notification from {request.address}")
+            
+            # Update our knowledge of the current leader
+            current_leader = request.address
+            logger.info(f"Updated current leader to {current_leader}")
+            
+            return block_chain_pb2.NotifyLeadershipResponse(
+                status="success"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error processing leadership notification: {e}")
+            return block_chain_pb2.NotifyLeadershipResponse(
                 status="failure",
                 error_message=str(e)
             )
