@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 from typing import List, Dict, Set, Optional
 import base64
+import traceback
 
 import block_chain_pb2
 import block_chain_pb2_grpc
@@ -35,20 +36,24 @@ votes_received: Dict[str, List[block_chain_pb2.BlockVoteResponse]] = {}
 current_leader = None  # Track the current leader's address
 server_health: Dict[str, float] = {}  # Track last heartbeat time for each server
 server_heartbeat_data: Dict[str, Dict] = {}  # Track heartbeat data for each server
+
 HEARTBEAT_TIMEOUT = 15  # Seconds before marking a server as unhealthy
+ENABLE_BLOCK_RECOVERY = False  # Flag to control block recovery functionality
+ELECTION_ENABLED = False  # Flag to control election functionality
 NEIGHBOR_NODES = [
-    # "169.254.103.61:50052",   # sameer
-    # "169.254.162.53:50051",   # serhat
-    "169.254.183.161:50051",  # harsha
-    "169.254.55.120:50051",    # brandon
-    "169.254.145.197:50051"   # jayasurya
-    # "169.254.137.247:50051",   # ronak
-    # "169.254.159.92:50053"     # suriya
+    "169.254.27.203:50052",   # sameer
+    # "169.254.183.161:50051",  # harsha
+    # "169.254.55.120:50051",   # brandon
+    "169.254.159.92:50053",   # suriya
+    # "169.254.45.104:50051",   # serhat
+    "169.254.153.82:50051"   # jayasurya
+    # "169.254.137.247:50051",  # ronak
 ]
 BLOCKS_DIR = "blocks"
 MAX_BLOCK_SIZE = 100  # Maximum number of audits per block
 MIN_MEMPOOL_SIZE = 3  # Minimum number of audits required to propose a block
 NODE_ADDRESS = "169.254.13.100:50051"  # Your WSL IP address
+FIRST_RUN = True
 
 def ensure_blocks_directory():
     """Ensure the blocks directory exists"""
@@ -178,6 +183,53 @@ def load_last_block() -> int:
     logger.info(f"Loaded last block number: {last_block}")
     return last_block
 
+def load_block_from_disk(block_id: int) -> Optional[block_chain_pb2.Block]:
+    """Load a specific block from disk by ID"""
+    ensure_blocks_directory()
+    filename = os.path.join(BLOCKS_DIR, f"block_{block_id}.json")
+    
+    if not os.path.exists(filename):
+        logger.warning(f"Block {block_id} not found on disk")
+        return None
+        
+    try:
+        with open(filename, 'r') as f:
+            block_dict = json.load(f)
+            
+        # Convert dictionary back to protobuf Block
+        block = block_chain_pb2.Block(
+            id=block_dict["id"],
+            hash=block_dict["hash"],
+            previous_hash=block_dict["previous_hash"],
+            merkle_root=block_dict["merkle_root"]
+        )
+        
+        # Convert audits back to protobuf FileAudit objects
+        for audit_dict in block_dict["audits"]:
+            audit = common_pb2.FileAudit(
+                req_id=audit_dict["req_id"],
+                file_info=common_pb2.FileInfo(
+                    file_id=audit_dict["file_info"]["file_id"],
+                    file_name=audit_dict["file_info"]["file_name"]
+                ),
+                user_info=common_pb2.UserInfo(
+                    user_id=audit_dict["user_info"]["user_id"],
+                    user_name=audit_dict["user_info"]["user_name"]
+                ),
+                access_type=audit_dict["access_type"],
+                timestamp=audit_dict["timestamp"],
+                signature=audit_dict["signature"],
+                public_key=audit_dict["public_key"]
+            )
+            block.audits.append(audit)
+            
+        logger.info(f"Successfully loaded block {block_id} from disk")
+        return block
+        
+    except Exception as e:
+        logger.error(f"Error loading block {block_id} from disk: {e}")
+        return None
+
 def generate_merkle_root(audits: List[common_pb2.FileAudit]) -> str:
     """Generate Merkle root from list of audits"""
     if not audits:
@@ -222,6 +274,12 @@ def verify_block(block: block_chain_pb2.Block) -> bool:
         if block_hash != block.hash:
             logger.error("Invalid block hash")
             return False
+            
+        # Verify all audit signatures in the block
+        for audit in block.audits:
+            if not verify_audit(audit):
+                logger.error(f"Audit {audit.req_id} in block {block.id} failed signature verification")
+                return False
         
         logger.info(f"Successfully verified block {block.id}")
         return True
@@ -349,31 +407,49 @@ def send_heartbeat_to_neighbors():
                 mem_pool_size=len(mempool)
             )
             
+            # Set a timeout for the heartbeat request
             response = stub.SendHeartbeat(request)
-            # if response.status == "success":
-            #     logger.info(f"Successfully sent heartbeat to {neighbor}")
-            # else:
-            #     logger.warning(f"Failed to send heartbeat to {neighbor}: {response.error_message}")
+            if response.status == "success":
+                logger.info(f"Successfully sent heartbeat to {neighbor}")
+            else:
+                logger.warning(f"Failed to send heartbeat to {neighbor}: {response.error_message}")
                 
         except grpc.RpcError as e:
             if e.code() == grpc.StatusCode.UNAVAILABLE:
                 logger.warning(f"Node {neighbor} is currently unavailable")
+            elif e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                logger.warning(f"Timeout while sending heartbeat to {neighbor}")
             else:
-                logger.error(f"Failed to send heartbeat to {neighbor}: {e}")
+                logger.error(f"gRPC error sending heartbeat to {neighbor}: {e.code()} - {e.details()}")
         except Exception as e:
             logger.error(f"Unexpected error sending heartbeat to {neighbor}: {e}")
+            logger.error(f"Error type: {type(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
 def heartbeat_loop():
     """Loop that periodically sends heartbeats to neighbors and checks leader health"""
+    global FIRST_RUN
     while True:
+        logger.info(f"Sending heartbeat to neighbors: {NEIGHBOR_NODES}")
         send_heartbeat_to_neighbors()
         time.sleep(10)
         check_leader_health()  # Check leader health after sending heartbeats
+        
+        # Check if we need to recover blocks from leader
+        if ENABLE_BLOCK_RECOVERY and ((current_leader is not None and is_server_healthy(current_leader)) or current_leader == NODE_ADDRESS):
+            leader_data = server_heartbeat_data.get(current_leader, {})
+            leader_block_id = leader_data.get('block_id', -1)
+            
+            if leader_block_id > current_block_number:
+                logger.info(f"We are behind the leader (our block: {current_block_number}, leader block: {leader_block_id})")
+                # Start block recovery in a separate thread
+                threading.Thread(target=recover_blocks_from_leader, daemon=True).start()
 
 def is_server_healthy(address: str) -> bool:
     """Check if a server is healthy based on its last heartbeat"""
     if address not in server_health:
         return False
+    
     return (time.time() - server_health[address]) < HEARTBEAT_TIMEOUT
 
 def get_healthy_neighbors() -> List[str]:
@@ -385,14 +461,13 @@ def trigger_election():
     global current_leader
     
     logger.info("Triggering new election")
-    max_votes = len(get_healthy_neighbors())
-    if max_votes == 0:
+    max_votes = len(get_healthy_neighbors()) + 1
+    if max_votes == 1:
         logger.info("No healthy neighbors, skipping election")
-        time.sleep(10)
         return
     
     votes_needed = max_votes // 2 + 1  # Majority of nodes
-    votes_received = 0
+    votes_received = 1
     
     for neighbor in get_healthy_neighbors():
         try:
@@ -406,8 +481,10 @@ def trigger_election():
             response = stub.TriggerElection(request)
             if response.vote:
                 votes_received += 1
-                logger.info(f"Received vote from {neighbor}")
-                
+                logger.info(f"Received yes vote from {neighbor}")
+            else:
+                logger.info(f"Received no vote from {neighbor}")
+        
         except Exception as e:
             logger.error(f"Failed to request vote from {neighbor}: {e}")
     
@@ -442,6 +519,9 @@ def notify_leadership():
 def check_leader_health():
     """Check if there is no current leader or if the current leader is unhealthy and trigger re-election if needed"""
     global current_leader
+    if not ELECTION_ENABLED:
+        return
+        
     if current_leader is None or (current_leader != NODE_ADDRESS and not is_server_healthy(current_leader)):
         logger.warning(f"No current leader or current leader {current_leader} is unhealthy, triggering re-election")
         trigger_election()
@@ -519,7 +599,7 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
             block = request
             logger.info(f"Voting on block {block.id}")
             
-            # Verify previous block hash and merkle root
+            # Verify block (now includes audit verification)
             if not verify_block(block):
                 logger.error(f"Block {block.id} failed verification")
                 return block_chain_pb2.BlockVoteResponse(
@@ -527,16 +607,6 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
                     status="failure",
                     error_message="Block verification failed"
                 )
-            
-            # Verify all audit signatures in the block
-            for audit in block.audits:
-                if not verify_audit(audit):
-                    logger.error(f"Audit {audit.req_id} in block {block.id} failed signature verification")
-                    return block_chain_pb2.BlockVoteResponse(
-                        vote=False,
-                        status="failure",
-                        error_message=f"Audit {audit.req_id} signature verification failed"
-                    )
             
             logger.info(f"Block {block.id} passed all verifications")
             
@@ -586,8 +656,7 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
         """Handle heartbeat request from other nodes"""
         try:
             global server_health, server_heartbeat_data, current_leader
-            logger.info(f"Received heartbeat from {request.from_address}")
-            logger.info(f"Current leader from heartbeat: {request.current_leader_address}")
+            logger.info(f"Received heartbeat from {request.from_address} [block_id: {request.latest_block_id}, leader: {request.current_leader_address}, mempool_size: {request.mem_pool_size}]")
             
             # Update server health status
             server_health[request.from_address] = time.time()
@@ -602,11 +671,6 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
             # Only update current_leader if it's None
             if current_leader is None and request.current_leader_address:
                 current_leader = request.current_leader_address
-                logger.info(f"Updated current leader to {current_leader}")
-            
-            # If we received a heartbeat from the current leader, they're healthy
-            if request.from_address == current_leader:
-                logger.info(f"Current leader {current_leader} is healthy")
             
             return block_chain_pb2.HeartbeatResponse(
                 status="success"
@@ -671,6 +735,44 @@ class BlockChainServiceServicer(block_chain_pb2_grpc.BlockChainServiceServicer):
                 error_message=str(e)
             )
 
+    def GetBlock(self, request, context):
+        """Handle GetBlock request from other nodes"""
+        try:
+            block_id = request.id
+            logger.info(f"Received GetBlock request for block {block_id}")
+            
+            # First check if we have the block in memory
+            if block_id in confirmed_blocks:
+                logger.info(f"Found block {block_id} in memory")
+                return block_chain_pb2.GetBlockResponse(
+                    block=confirmed_blocks[block_id],
+                    status="success"
+                )
+            
+            # If not in memory, try to load from disk
+            block = load_block_from_disk(block_id)
+            if block:
+                # Cache the block in memory
+                confirmed_blocks[block_id] = block
+                logger.info(f"Found block {block_id} on disk")
+                return block_chain_pb2.GetBlockResponse(
+                    block=block,
+                    status="success"
+                )
+            
+            logger.warning(f"Block {block_id} not found")
+            return block_chain_pb2.GetBlockResponse(
+                status="failure",
+                error_message=f"Block {block_id} not found"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error processing GetBlock request: {e}")
+            return block_chain_pb2.GetBlockResponse(
+                status="failure",
+                error_message=str(e)
+            )
+
 class FileAuditServiceServicer(file_audit_pb2_grpc.FileAuditServiceServicer):
     def SubmitAudit(self, request, context):
         try:
@@ -725,6 +827,16 @@ def serve():
     current_block_number = load_last_block()
     logger.info(f"Starting from block {current_block_number}")
     
+    # Load all existing blocks into memory
+    for block_id in range(current_block_number + 1):
+        block = load_block_from_disk(block_id)
+        if block:
+            confirmed_blocks[block_id] = block
+            logger.info(f"Loaded block {block_id} into memory")
+    
+    # Extract port from NODE_ADDRESS
+    port = 50051
+    
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     
     block_chain_pb2_grpc.add_BlockChainServiceServicer_to_server(
@@ -736,17 +848,58 @@ def serve():
         server
     )
     
-    # Extract port from NODE_ADDRESS
-    port = NODE_ADDRESS.split(":")[1]
-    server.add_insecure_port(f"[::]:{port}")
+    # Log server binding information
+    server.add_insecure_port(f"0.0.0.0:{port}")  # Bind to all IPv4 interfaces
     server.start()
-    logger.info(f"Full Node running on {NODE_ADDRESS}...")
-
+    
     # Start both the proposer and heartbeat loops
     threading.Thread(target=proposer_loop, daemon=True).start()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
 
     server.wait_for_termination()
+
+def recover_blocks_from_leader():
+    """Recover missing blocks from the leader"""
+    global current_block_number, confirmed_blocks
+    
+    if not current_leader:
+        logger.warning("No current leader, cannot recover blocks")
+        return
+        
+    try:
+        channel = grpc.insecure_channel(current_leader)
+        stub = block_chain_pb2_grpc.BlockChainServiceStub(channel)
+        
+        # Get leader's latest block ID from our stored data
+        leader_data = server_heartbeat_data.get(current_leader, {})
+        leader_block_id = leader_data.get('block_id', -1)
+        
+        if leader_block_id <= current_block_number:
+            logger.info("No new blocks to recover")
+            return
+            
+        # Request each missing block
+        for block_id in range(current_block_number + 1, leader_block_id + 1):
+            request = block_chain_pb2.GetBlockRequest(id=block_id)
+            response = stub.GetBlock(request)
+            
+            if response.status == "success":
+                block = response.block
+                # Verify the block before accepting it
+                if verify_block(block):
+                    confirmed_blocks[block_id] = block
+                    save_block_to_disk(block)
+                    current_block_number = block_id
+                    logger.info(f"Recovered block {block_id} from leader")
+                else:
+                    logger.error(f"Block {block_id} failed verification")
+                    break
+            else:
+                logger.error(f"Failed to get block {block_id} from leader: {response.error_message}")
+                break
+                
+    except Exception as e:
+        logger.error(f"Error recovering blocks from leader: {e}")
 
 if __name__ == "__main__":
     serve()
